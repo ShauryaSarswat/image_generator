@@ -1,62 +1,50 @@
-const axios = require("axios");
-const cloudinary = require("../config/cloudinary");
-const Generation = require("../models/generation.model");
+// controllers/generation.controller.js
+const generationService = require("../services/generation.service");
+const User = require("../models/user.model");
 
-exports.generateImage = async (req, res) => {
+exports.generateImage = async (req, res, next) => {
   try {
-    const { prompt, style_id = 4, size = "1-1" } = req.body;
+    const { prompt, style_id, size } = req.body;
 
-    if (!prompt || !prompt.trim()) {
-      return res.status(400).json({ message: "Prompt is required" });
-    }
-
-    // 1️⃣ Call Flux Free RapidAPI
-    const apiResponse = await axios.post(
-      "https://ai-text-to-image-generator-flux-free-api.p.rapidapi.com/aaaaaaaaaaaaaaaaaiimagegenerator/quick.php",
-      { prompt, style_id, size },
-      {
-        headers: {
-          "x-rapidapi-key": process.env.RAPIDAPI_KEY,
-          "x-rapidapi-host": process.env.RAPIDAPI_HOST,
-          "Content-Type": "application/json",
-        },
-        responseType: "json",
-      }
+    // 1️⃣ Generate image & save to DB
+    const generation = await generationService.generateImageForUser(
+      req.user._id,
+      { prompt, style_id, size }
     );
 
-    const results = apiResponse.data?.final_result;
-    if (!results || !results.length) {
-      return res.status(500).json({ message: "No image returned from API" });
-    }
-
-    // 2️⃣ Use the first image URL from API
-    const imageUrlFromApi = results[0].origin;
-
-    // 3️⃣ Upload to Cloudinary
-    const cloudinaryUrl = await new Promise((resolve, reject) => {
-      cloudinary.uploader.upload(
-        imageUrlFromApi,
-        { folder: "generated-images", resource_type: "image" },
-        (err, result) => {
-          if (err) return reject(err);
-          resolve(result.secure_url);
-        }
-      );
-    });
-
-    // 4️⃣ Save in MongoDB
-    const generation = await Generation.create({
-      user: req.user?._id,
-      prompt,
-      imageUrl: cloudinaryUrl,
-    });
+    // 2️⃣ Increment user's generation count
+    await User.findByIdAndUpdate(req.user._id, { $inc: { generationCount: 1 } });
 
     res.status(201).json({ success: true, generation });
   } catch (err) {
-    console.error("Image generation error:", err.response?.data || err.message);
-    res.status(500).json({
-      success: false,
-      message: err.response?.data?.message || err.message || "Internal Server Error",
-    });
+    console.error("Image generation error:", err.message);
+    next(err); // will be handled by error.middleware.js
+  }
+};
+
+// GET /api/generations -> user-specific
+exports.getUserGenerations = async (req, res, next) => {
+  try {
+    const generations = await generationService.getUserGenerations(req.user._id);
+    res.status(200).json({ success: true, generations });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// GET /api/generations/all -> all generations (public/admin)
+exports.getGenerationById = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const generation = await generationService.getGenerationById(id, req.user._id);
+
+    res.status(200).json({ success: true, generation });
+  } catch (err) {
+    // If the generation is not found, return 404
+    if (err.message === "Generation not found") {
+      return res.status(404).json({ success: false, message: err.message });
+    }
+    next(err);
   }
 };
